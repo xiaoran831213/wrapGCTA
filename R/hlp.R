@@ -41,7 +41,7 @@
     rsq <- cyh^2
     
     ## negative likelihood
-    ldt <- determinant(V) / N
+    ldt <- with(determinant(V), modulus * sign) / N
     eae <- sum(alpha * e) / N           # e^T V^{-1} e
     nlk <- eae + ldt
     
@@ -54,7 +54,20 @@
     rpt
 }
 
-gcta.test <- function(N=500, P=2000)
+#' Test GCTA
+#'
+#' Generate a training and testing sample of given size N and (genomic) feature size
+#' P. Develop a LMM model of two kernels (linear + quadratic) and 3 fixed effects on
+#' the training data, evaluate this model on the testing data.
+#' 
+#' @param N the sample size
+#' @param P the number of genomic features (i.e., SNP)
+#' @param e the size of noise
+#' 
+#' @return a list, containing the estimated fixed effect and variance components,
+#' the performance on both training and testing data.
+#' @export
+gcta.test <- function(N=500, P=2000, e=5.0)
 {
     ## ------------------------------ generation ------------------------------ ##
     ## design matrix for fix effect
@@ -73,8 +86,8 @@ gcta.test <- function(N=500, P=2000)
     K.evl <- list(LN1=tcrossprod(scale(Z.evl)) / P) # 1st order
     K.evl$LN2 <- K.evl$LN1^2                        # 2nd order
 
-    eps <- c(EPS=1.0)                   # true noise
-    vcs <- c(LN1=1.3, LN2=0.7)          # true effect
+    eps <- c(EPS=e)                     # true noise
+    vcs <- c(LN1=1.3, LN2=1.0)          # true effect
 
     ## matrix of covariance
     S.dvp <- vcs[1] * K.dvp$LN1 + vcs[2] * K.dvp$LN2 # Sigma
@@ -98,6 +111,5 @@ gcta.test <- function(N=500, P=2000)
     pd4 <- .vpd(y.evl, K=K.use[-1], md4$par, X.use)
     
     ret <- list(par=par, dvp=md4$rpt, evl=pd4)
-    print(ret$par)
     ret
 }

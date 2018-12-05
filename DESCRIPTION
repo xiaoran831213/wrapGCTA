@@ -2,11 +2,11 @@ Package: wrapGCTA
 Title: A R wrapper for Genome-wide complex trait analysis (GCTA)
 Version: 0.0.1
 Authors@R: person("Xiaoran", "Tong", email = "tongxia1@msu.edu", role = c("aut", "cre"))
-Description: the package takes a design matrix and kernel matrices and run the REML analysis with GCTA. It does so by writing the objects into temporary files recoganizable by GCTA, and call the executable via from within R.
+Description: the package takes one or more genetic relatedness matrices (i.e., kinship, IBS, etc.) and a design matrix of fixed effect to form a linear mixed model, and solve it with GCTA. It does so by writing the R matrix objects to temporary files recoganizable by GCTA, and call the executable (automatically download) from within R, collect the report, and clean up. GCTA is developed by Jian Yang et. al., which is a popular tool for calculating the genetic contribution to a phenotype of interest.
 Depends: R (>= 3.2.0)
 License: MIT + file LICENSE
 Encoding: UTF-8
 LazyData: true
-RoxygenNote: 6.1.0
 Imports:
     MASS
+RoxygenNote: 6.0.1

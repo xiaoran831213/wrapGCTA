@@ -1,5 +1,5 @@
 ## GCTA wrappers
-.find.gcta <- function()
+.find.gcta <- function(download=TRUE)
 {
     os <- Sys.info()['sysname']
     if(grepl("Windows", os, TRUE))
@@ -14,7 +14,7 @@
         ex <- paste0(ex, '.exe')
 
     ## must be the one and only executables for a specific OS
-    if(!file.exists(ex))
+    if(!file.exists(ex) && download)
     {
         ## download GCTA64 1.9 beta
         cat("Download GCTA64 for ", os, "\n", sep="")
@@ -30,15 +30,15 @@
 
         ## unzip
         xf <- grep("gcta[0-9][0-9]", unzip(zf, list=TRUE)$Name, value=TRUE)
-        unzip(zf, xf, junkpaths=TRUE, overwrite=TRUE, exdir=file.path('bin', os))
+        unzip(zf, xf, junkpaths=TRUE, overwrite=TRUE, exdir=dirname(ex))
         unlink(zf)
 
         if(os == 'lnx' || os == 'mac')
             Sys.chmod(ex, mode = "0777", use_umask = TRUE)
-    }
 
-    if(!file.exists(ex))
-        stop("could not fetch GCTA64.")
+        if(!file.exists(ex))
+            stop("could not fetch GCTA64.")
+    }
     ex
 }
 
@@ -129,7 +129,11 @@ gcta.reml <- function(y, K, X=NULL, maxit=100, rm.temp=TRUE)
     ext <- system(cmd)
     td <- Sys.time() - t0; units(td) <- 'secs'; td <- as.numeric(td)
     if(ext != 0)
+    {
+        if(rm.temp)
+            unlink(wd, TRUE, TRUE)
         stop(cmd, ' GCTA existed with non-zero.')
+    }
 
     ## prepend intercept (GCTA does this by itself)
     X <- cbind(X00=rep(1, N), X)
@@ -167,7 +171,7 @@ gcta.reml <- function(y, K, X=NULL, maxit=100, rm.temp=TRUE)
         val=c(mse, nlk, cyh, rsq, td, N))
     rownames(rpt) <- rpt$key
 
-    ## remove temporary directory
+    ## remove temporary files
     if(rm.temp)
         unlink(wd, TRUE, TRUE)
 
