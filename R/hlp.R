@@ -1,57 +1,28 @@
-#' Variance component model prediction
-#' 
-#' @param y a vector of response variable
-#' @param K a list of covariance kernels
-#' @param W a vector of parameters (beta, sigma^2)
-#' @param X matrix of covariate, intercept included
-#' @param rt return a table? if false, a named vector is returned
-.vpd <- function(y, K=NULL, W=NULL, X=NULL, rt=1)
+## helper function to make kernels
+mks <- function(zmx, vcs)
 {
-    y <- unname(y)
-    N <- NROW(y)
-
-    ## fixed effect?
-    if(!is.null(X))
+    ncv <- length(vcs)
+    cv1 <- tcrossprod(scale(zmx, TRUE, TRUE)) / NCOL(zmx)
+    ret <- lapply(seq.int(ncv), function(p)
     {
-        xb <- X %*% W[1:NCOL(X)]
-        W <- W[-(1:NCOL(X))]
-    }
-    else
-        xb <- 0
-    e <- y - xb
+        kp <- cv1^p
+        kp <-  kp / mean(diag(kp))
+        kp <- with(eigen(kp, TRUE), tcrossprod(vectors %*% diag(pmax(values, 0)), vectors))
+        kp
+    })
+    names(ret) <- names(vcs)
+    ret
+}
+## helper ofunction to combine kernels
+cmb <- function(kns, vcs) Reduce(`+`, mapply(`*`, kns, vcs, SIMPLIFY=FALSE))
 
-    ## use null model?
-    if(is.null(W))
-        W <- c(EPS=sum(e^2) / N)
-
-    ## prepand noisy kernel
-    C <- c(list(EPS=diag(N)), cv=K)
-    
-    ## make predictions
-    V <- unname(Reduce(`+`, mapply(`*`, C, W, SIMPLIFY=FALSE)))
-    alpha <- solve(V, e)                # V^{-1}e
-    f <- V - diag(W[1], length(e))      # W[1] is ESP
-
-    ## prediction: conditional mean and covariance
-    h <- f %*% alpha + xb
-    mht <- mean(h)
-    
-    mse <- mean((y - h)^2)
-    cyh <- if(sd(h) == 0) 0 else cyh <- cor(y, h)
-    rsq <- cyh^2
-    
-    ## negative likelihood
-    ldt <- with(determinant(V), modulus * sign) / N
-    eae <- sum(alpha * e) / N           # e^T V^{-1} e
-    nlk <- eae + ldt
-    
-    ## return
-    rpt <- c(rsq=rsq, mse=mse, nlk=nlk, cyh=cyh, mht=mht, ssz=N)
-    if(rt == 1)
-        rpt <- data.frame(key=names(rpt), val=rpt, row.names=names(rpt))
-    if(rt == 2)
-        rpt <- data.frame(t(rpt))
-    rpt
+## helper function to simulate MVN
+mvn <- function(mcv)
+{
+    N <- nrow(mcv)
+    e <- eigen(mcv, symmetric = TRUE)
+    y <- rnorm(N)
+    e$vectors %*% diag(sqrt(pmax(e$values, 0)), N) %*% y
 }
 
 #' Test GCTA
@@ -62,12 +33,14 @@
 #' 
 #' @param N the sample size
 #' @param P the number of genomic features (i.e., SNP)
-#' @param e the size of noise
+#' @param eps the size of noise
+#' @param vcs true variances components to generate data
+#' @param use number of components used for model development.
 #' 
 #' @return a list, containing the estimated fixed effect and variance components,
 #' the performance on both training and testing data.
 #' @export
-gcta.test <- function(N=500, P=2000, e=5.0)
+gcta.test <- function(N=500, P=2000, eps=2.0, vcs=c(0.5, 1.0, 2.0), use=3)
 {
     ## ------------------------------ generation ------------------------------ ##
     ## design matrix for fix effect
@@ -76,40 +49,33 @@ gcta.test <- function(N=500, P=2000, e=5.0)
     bts <- c(X00=-0.6, X01=0.5, X02=1.0, X03=-1.0) # beta
     M.dvp <- X.dvp %*% bts                         # mean
     M.evl <- X.evl %*% bts                         # mean
+    names(eps) <- "EPS"                            # true noise
+    names(vcs) <- sprintf("K%02d", seq_along(vcs))
     
     ## design matrix for random effect
     Z.dvp <- matrix(rpois(N * P, 2), N, P)
+    K.dvp <- mks(Z.dvp, vcs)
     Z.evl <- matrix(rpois(N * P, 2), N, P)
-    K.dvp <- list(LN1=tcrossprod(scale(Z.dvp)) / P) # 1st order
-    K.dvp$LN2 <- K.dvp$LN1^2                        # 2nd order
-
-    K.evl <- list(LN1=tcrossprod(scale(Z.evl)) / P) # 1st order
-    K.evl$LN2 <- K.evl$LN1^2                        # 2nd order
-
-    eps <- c(EPS=e)                     # true noise
-    vcs <- c(LN1=1.3, LN2=1.0)          # true effect
-
-    ## matrix of covariance
-    S.dvp <- vcs[1] * K.dvp$LN1 + vcs[2] * K.dvp$LN2 # Sigma
-    S.evl <- vcs[1] * K.evl$LN1 + vcs[2] * K.evl$LN2 # Sigma
+    K.evl <- mks(Z.evl, vcs)
     
+    ## matrix of covariance
+    S.dvp <- cmb(K.dvp, vcs)            # Sigma
+    S.evl <- cmb(K.evl, vcs)            # Sigma
+
     ## response
-    y.dvp <- MASS::mvrnorm(1, M.dvp, S.dvp) + rnorm(N, 0, sqrt(eps))
-    y.evl <- MASS::mvrnorm(1, M.evl, S.evl) + rnorm(N, 0, sqrt(eps))
+    y.dvp <- M.dvp + mvn(S.dvp) + rnorm(N, 0, sqrt(eps))
+    y.evl <- M.evl + mvn(S.evl) + rnorm(N, 0, sqrt(eps))
 
     ## ------------------------------ working fit ------------------------------ ##
     ## working design matrix and kernels
-    X.use <- X.dvp # [, -1]
-    K.use <- list(EPS=diag(N), LN1=K.dvp$LN1, LN2=K.dvp$LN1^2)
+    X.use <- X.dvp[, -1]
+    K.use <- K.dvp[seq.int(use)]
 
-    md4 <- gcta.reml(y.dvp, K.use[-1], X.use[, -1]) # call GCTA
-    par <- rbind(gct=md4$par, ref=c(bts, eps, vcs))
-
-    ## ------------------------------ testing ------------------------------ ##
-    X.use <- X.evl # [, -1]
-    K.use <- list(EPS=diag(N), LN1=K.evl$LN1, LN2=K.evl$LN1^2)
-    pd4 <- .vpd(y.evl, K=K.use[-1], md4$par, X.use)
+    md1 <- gcta.reml(y.dvp, K.use, X.use, zbd=0) # GCTA
+    md2 <- gcta.reml(y.dvp, K.use, X.use, zbd=1) # GCTA
+    ref <- c(bts, eps, vcs)
+    par <- rbind(md1$par, md2$par)
     
-    ret <- list(par=par, dvp=md4$rpt, evl=pd4)
+    ret <- list(ref=ref, par=par)
     ret
 }

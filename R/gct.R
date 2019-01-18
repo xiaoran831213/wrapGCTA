@@ -1,6 +1,7 @@
 ## GCTA wrappers
 .find.gcta <- function(download=TRUE)
 {
+    ## find OS type
     os <- Sys.info()['sysname']
     if(grepl("Windows", os, TRUE))
         os <- 'win'
@@ -9,6 +10,19 @@
     else
         os <- 'lnx'
 
+    ## try gcta on OS search path
+    ex <- Sys.which('gcta64')
+    if(file.exists(ex))
+    {
+        ## cat("Find gcta64 at ", ex, "\n", sep="")
+        return('gcta64')
+    }
+    if(file.exists(Sys.which('gcta')))
+    {
+        ## cat("Find gcta at ", ex, "\n", sep="")
+        return('gcta')
+    }
+    ## try project path
     ex <- file.path('gcta', os, 'gcta64')
     if(os == 'win')
         ex <- paste0(ex, '.exe')
@@ -53,136 +67,120 @@ gcta.clean <- function() unlink('gcta', TRUE, TRUE)
 #' @param y vector of response
 #' @param K list of N x N kernel matrices
 #' @param X design matrix of fixed effect, numerically coded
-#' @param maxit maximum number of iterations
+#' @param zbd TRUE to lower bound the variance component to 0 (def=TRUE).
+#' @param itr maximum number of iterations
+#' @param alg integer to specify the alorithm to be used, 0=Average information,
+#' 1=Fisher Scoring, 2=EM, corresponding to option --reml-alg.
+#' @param quiet TRUE to execute GCTA quietly.
 #' @param rm.temp remove temporary files (relatedness matrices in GCTA format.)
+#' after computation.
 #'
 #' @return list of estimates, report, predicted effect, and log.
 #' @export
-gcta.reml <- function(y, K, X=NULL, maxit=100, rm.temp=TRUE)
+gcta.reml <- function(y, K, X=NULL, zbd=TRUE, itr=100, alg=1, quiet=TRUE, rm.temp=TRUE)
 {
-    ## a function to write tab-delimited table
     WT <- function(x, f) write.table(x, f, quote=FALSE, sep='\t', row.names=FALSE, col.names=FALSE)
-
-    ## printf
     PF <- function(...) cat(sprintf(...))
 
     ## temporary working directory for GCTA
     wd <- paste0("gcta", tempfile("", ''))
     if(!dir.create(wd, FALSE, TRUE))
-        stop('failed to create directory', GRM.dir)
+        stop('failed to create directory', wd)
     N <- NROW(y)
 
-    ## save GRM
-    GRM <- K
-    if(is.null(names(GRM)))
-        names(GRM) <- sprintf('G%02d', seq(length(GRM)))
-    K <- c(list(EPS=diag(N)), K)
+    ## write GRM files
+    if(is.null(names(K)))
+        names(K) <- sprintf('G%02d', seq_along(K))
     
-    GRM.dir <- file.path(wd, 'grm')
-    if(!dir.create(GRM.dir))
-        stop('failed to create directory', GRM.dir)
-    GRM.path <- file.path(GRM.dir, names(GRM))
-    for(i in seq_along(GRM))
+    dir.grm <- file.path(wd, 'grm')
+    if(!dir.create(dir.grm)) stop('failed to create directory', dir.grm)
+    fns.grm <- file.path(dir.grm, names(K))
+    for(i in seq_along(K))
     {
-        .saveGRM(GRM.path[i], GRM[[i]])
-        PF("save GRM: %d %16s %8d %8d\n", i, GRM.path[i], nrow(GRM[i]), ncol(GRM[i]))
+        .saveGRM(fns.grm[i], K[[i]])
+        PF("Write GRM: %d %16s %8d %8d\n", i, fns.grm[i], N, N)
     }
-    mgrm.path <- file.path(wd, 'grm.lst')
-    write(GRM.path, mgrm.path)
 
     ## write phenotype
-    id <- .makeID(GRM[[1]])
-    phe.path <- file.path(wd, 'phe.txt')
-    WT(cbind(id, y), phe.path) # phenotype
+    id <- .makeID(K[[1]])
+    fns.phe <- file.path(wd, 'phe.txt')
+    WT(cbind(id, y), fns.phe) # phenotype
 
-    ## covariate, assume X is numerically coded 
-    if(!is.null(X))
+    ## covariate, assume X is numerically coded
+    ## number of fix effect
+    nfx <- if(length(X) > 0) NCOL(X) else 0
+    if(nfx > 0L)
     {
-        qcv.path <- file.path(wd, 'qcv.txt')
-        WT(cbind(id, X), qcv.path)
+        fns.qcv <- file.path(wd, 'qcv.txt')
+        WT(cbind(id, X), fns.qcv)
     }
+    
+    ## RUN GCTA, recursively
+    tm <- 0
+    vcs <- rep(1, length(K))            # init VCs as positive
+    eps <- 1
+    fns.mgr <- file.path(wd, 'mgr')     # list of GRMs
 
     ## compose GCTA command
-    exe <- .find.gcta()                 # binary
-    fun <- '--reml'                     # REML
-    if(length(GRM) == 1)                # GRM(s)
-        mgm <- paste('--grm', GRM.path[[1]])
-    else
-        mgm <- paste('--mgrm', mgrm.path)
-    phe <- paste('--pheno', phe.path)
+    cmd <- paste(.find.gcta(), "--reml")
 
-    if(!is.null(X))
-        qcv <- paste('--qcovar', qcv.path)
-    else
-        qcv <- NULL
-    
-    out <- paste('--out', file.path(wd, 'out'))
+    ## the list of kernels, drop those corresponding to non-positive
+    ## variance components estimated by previouse GCTA RUN
+    write(fns.grm, fns.mgr)
+    cmd <- paste(cmd, '--mgrm',  fns.mgr)
+    cmd <- paste(cmd, '--pheno', fns.phe)
+    if(length(X) > 0L)
+        cmd <- paste(cmd, '--qcovar', fns.qcv)
+    cmd <- paste(cmd, '--out', file.path(wd, 'out'))
 
-    opt <- paste('--reml-pred-rand', '--reml-no-lrt', '--thread-num 1', '--reml-est-fix')
-    if(!is.null(maxit))
-        opt <- paste(opt, '--reml-maxit', maxit)
+    ## iteration limit
+    if(!is.null(itr))
+        cmd <- paste(cmd, '--reml-maxit', itr)
+    ## algorithms (0=AI, 1=FS, 2=EM)
+    if(!is.null(alg))
+        cmd <- paste(cmd, '--reml-alg', alg)
+    if(!is.null(zbd) && !zbd)
+        cmd <- paste(cmd, '--reml-no-constrain')
 
-    cmd <- paste(exe, fun, mgm, phe, qcv, out, opt)
+    ## other options
+    opt <- paste('--reml-pred-rand', '--reml-no-lrt', '--thread-num 1',
+                 '--reml-est-fix')
+    cmd <- paste(cmd, opt)
 
     ## execute command
     t0 <- Sys.time()
-    ext <- system(cmd)
+    ext <- system(cmd, intern=FALSE, ignore.stdout=quiet)
     td <- Sys.time() - t0; units(td) <- 'secs'; td <- as.numeric(td)
-    if(ext != 0)
+    tm <- tm + td
+
+    if(ext != 0)                    # error ?
     {
+        err <- grep('^error:', readLines(file.path(wd, 'out.log')), TRUE, value=TRUE)
         if(rm.temp)
             unlink(wd, TRUE, TRUE)
-        stop(cmd, ' GCTA existed with non-zero.')
+        stop(cmd, ' GCTA existed with non-zero:', err)
     }
 
-    ## prepend intercept (GCTA does this by itself)
-    X <- cbind(X00=rep(1, N), X)
-
-    ## parse the output
-    out <- within(.gcta.parse(wd),
-    {
-        names(par) <- c(colnames(X), names(K))
-        names(se1) <- names(par)
-    })
-
-    ## prediction
-    y <- y - X %*% out$par[seq(ncol(X))]
-    vcs <- out$par[-seq(ncol(X))]
-    
-    ## summary
-    h <- rowSums(out$blp[-1:-3])
-    v <- Reduce(`+`, mapply(`*`, K, vcs, SIMPLIFY=FALSE))
-    u <- chol(v)
-    a <- chol2inv(u)
-
-    ## mse <- mean((y - h)^2)           # mean squre error
-    mse <- mean(out$blp[, 3]^2)         # estimate residual
-    cyh <- cor(y, h)                    # correlation
-    rsq <- cyh^2
-    ## nlk <- .5 * sum(crossprod(y, a) * y) + sum(log(diag(u))) + .5 * N * log(2 * pi)
-    nlk <- crossprod(y, a) %*% y + 2 * sum(log(diag(u)))
-    nlk <-  nlk / N                     # NLK
-
-    ## h <- y - a %*% y / diag(a)
-    ## loo <- mean((y - h)^2)
-
-    rpt <- data.frame(
-        key=c('mse', 'nlk', 'cyh', 'rsq', 'rtm', 'ssz'),
-        val=c(mse, nlk, cyh, rsq, td, N))
-    rownames(rpt) <- rpt$key
+    ## success
+    out <- gcta.parse(wd)
+    par <- out$par
+    names(par)[seq(1 + nfx)] <- if(nfx > 0) c("X00", colnames(X)) else "X00"
+    names(par)[2 + nfx] <- "EPS"
+    names(par)[seq(3 + nfx, length(par))] <- names(K)
+    cat(paste(sprintf("%-9s", round(par, 5), collapse=" ")), "\n", sep="")
 
     ## remove temporary files
     if(rm.temp)
         unlink(wd, TRUE, TRUE)
 
-    ## pack up and return
-    c(list(cmd=cmd, ext=ext, rpt=rpt), out)
+    ## return
+    list(cmd=cmd, ext=ext, par=par, rtm=tm)
 }
 
 #' Parse GCTA output
 #'
 #' @param wd the working directory for GCTA
-.gcta.parse <- function(wd)
+gcta.parse <- function(wd)
 {
     ## --- parse *.hsq for variance ---
     hsq.path <- file.path(wd, 'out.hsq')
